@@ -781,7 +781,7 @@ func (e *Exporter) Connect() {
           config.Cfgs[i].Database = dbname
           config.Cfgs[i].Instance = inname
         }
-        e.up.WithLabelValues(conf.Database,conf.Instance).Set(1)
+        e.up.WithLabelValues(config.Cfgs[i].Database, config.Cfgs[i].Instance).Set(1)
       } else {
         config.Cfgs[i].db.Close()
         config.Cfgs[i].db = nil;
