@@ -42,7 +42,7 @@ var (
 // Get individual ScrapeTime per Prometheus instance for alertlog
 func (e *Exporter) GetLastScrapeTime(conf int) time.Time {
   for i, _ := range lastlog.Cfgs {
-    if lastlog.Cfgs[i].Instance == config.Cfgs[conf].Instance {
+    if lastlog.Cfgs[i].Instance == e.config.Cfgs[conf].Instance {
       for n, _ := range lastlog.Cfgs[i].Clients {
         if lastlog.Cfgs[i].Clients[n].Ip == e.lastIp {
           t, _ := time.Parse("2006-01-02 15:04:05 -0700 MST",string(lastlog.Cfgs[i].Clients[n].Date))
@@ -59,7 +59,7 @@ func (e *Exporter) SetLastScrapeTime(conf int,t time.Time) {
   var indInst int = -1
   var indIp int = -1
   for i, _ := range lastlog.Cfgs {
-    if lastlog.Cfgs[i].Instance == config.Cfgs[conf].Instance {
+    if lastlog.Cfgs[i].Instance == e.config.Cfgs[conf].Instance {
       indInst = i
       for n, _ := range lastlog.Cfgs[i].Clients {
         if lastlog.Cfgs[i].Clients[n].Ip == e.lastIp {
@@ -70,7 +70,7 @@ func (e *Exporter) SetLastScrapeTime(conf int,t time.Time) {
   }
   if indInst == -1 {
     cln := Client{Ip: e.lastIp, Date: t.Format("2006-01-02 15:04:05 -0700 MST")}
-    lastlog.Cfgs = append(lastlog.Cfgs, Lastlog{Instance: config.Cfgs[conf].Instance,
+    lastlog.Cfgs = append(lastlog.Cfgs, Lastlog{Instance: e.config.Cfgs[conf].Instance,
                                                 Clients:  []Client{ cln } } )
   }else{
     if indIp == -1 {
@@ -82,7 +82,7 @@ func (e *Exporter) SetLastScrapeTime(conf int,t time.Time) {
   }
 }
 
-func addError(conf int, ora string, text string){
+func (e *Exporter) AddError(conf int, ora string, text string){
   var found bool = false
   for i, _ := range Errors {
     if Errors[i].ora == ora {
@@ -92,7 +92,7 @@ func addError(conf int, ora string, text string){
   }
   if ! found {
     ignore := "0"
-    for _ , e := range config.Cfgs[conf].Alertlog[0].Ignoreora {
+    for _ , e := range e.config.Cfgs[conf].Alertlog[0].Ignoreora {
       if e == ora {; ignore = "1"; }
     }
     is := strings.Index(text, " ")
@@ -109,8 +109,8 @@ func (e *Exporter) ScrapeAlertlog() {
   re      := regexp.MustCompile(`O(RA|GG)-[0-9]+`)
 
   ReadAccess()
-  for conf, _ := range config.Cfgs {
-    if config.Cfgs[conf].Alertlog == nil {
+  for conf, _ := range e.config.Cfgs {
+    if e.config.Cfgs[conf].Alertlog == nil {
        continue
     }
 
@@ -118,8 +118,8 @@ func (e *Exporter) ScrapeAlertlog() {
     Errors = nil
     lastScrapeTime := e.GetLastScrapeTime(conf).Add(time.Second)
 
-    info, _ := os.Stat(config.Cfgs[conf].Alertlog[0].File)
-    file, err := os.Open(config.Cfgs[conf].Alertlog[0].File)
+    info, _ := os.Stat(e.config.Cfgs[conf].Alertlog[0].File)
+    file, err := os.Open(e.config.Cfgs[conf].Alertlog[0].File)
     if err != nil {
       log.Infoln(err)
     } else{
@@ -132,24 +132,24 @@ func (e *Exporter) ScrapeAlertlog() {
           if lastTime.After(lastScrapeTime) {
             if re.MatchString(scanner.Text()) {
               ora := re.FindString(scanner.Text())
-              addError(conf,ora, scanner.Text())
+              e.AddError(conf,ora, scanner.Text())
             }
           }
         }
       }
       e.SetLastScrapeTime(conf,lastTime)
       for i, _ := range Errors {
-        e.alertlog.WithLabelValues(config.Cfgs[conf].Database,
-                                   config.Cfgs[conf].Instance,
+        e.alertlog.WithLabelValues(e.config.Cfgs[conf].Database,
+                                   e.config.Cfgs[conf].Instance,
                                    Errors[i].ora,
                                    Errors[i].text,
                                    Errors[i].ignore).Set(float64(Errors[i].count))
-        WriteLog(config.Cfgs[conf].Instance + " " + e.lastIp +
+        WriteLog(e.config.Cfgs[conf].Instance + " " + e.lastIp +
                  " (" + Errors[i].ignore + "/" + strconv.Itoa(Errors[i].count) + "): " +
                  Errors[i].ora + " - " + Errors[i].text)
       }
-      e.alertdate.WithLabelValues(config.Cfgs[conf].Database,
-                                  config.Cfgs[conf].Instance).Set(float64(info.ModTime().Unix()))
+      e.alertdate.WithLabelValues(e.config.Cfgs[conf].Database,
+                                  e.config.Cfgs[conf].Instance).Set(float64(info.ModTime().Unix()))
     }
     if file != nil {; file.Close();}
   }

@@ -39,7 +39,7 @@ You can define your own Queries and execute/scrape them
 
 # Installation
 
-Ensure that the configfile (oracle.conf) is set correctly before starting. You can add multiple instances, e.g. the ASM instance. It is even possible to run one Exporter for all your Databases, but this is not recommended. We use it in our Company because on one host multiple Instances are running.
+Ensure that the configfile (oracle.yml) is set correctly before starting. You can add multiple instances, e.g. the ASM instance. It is even possible to run one Exporter for all your Databases, but this is not recommended. We use it in our Company because on one host multiple Instances are running.
 
 # Prometheus Configuration
 ```
@@ -90,7 +90,7 @@ scrape_configs:
 
 ```bash
 export NLS_LANG=AMERICAN_AMERICA.UTF8
-/path/to/binary -configfile=/home/user/oracle.conf -web.listen-address :9161
+/path/to/binary -configfile=/home/user/oracle.yml -web.listen-address :9161
 ```
 
 ## Usage
@@ -100,7 +100,7 @@ Usage of ./prometheus_oracle_exporter:
   -accessfile string
     	Last access for parsed Oracle Alerts. (default "access.conf")
   -configfile string
-    	ConfigurationFile in YAML format. (default "oracle.conf")
+    	ConfigurationFile in YAML format. (default "oracle.yml")
   -indexbytes
     	Expose Index size for any Table (CAN TAKE VERY LONG)
   -lobbytes

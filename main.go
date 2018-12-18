@@ -1,13 +1,20 @@
 package main
 
 import (
+    "os"
+    "fmt"
     "database/sql"
     "flag"
     "net"
     "net/http"
+    "net/http/pprof"
     "time"
+    "path/filepath"
+    "io/ioutil"
+    "gopkg.in/yaml.v2"
   _ "github.com/mattn/go-oci8"
     "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
     "github.com/prometheus/common/log"
 )
 
@@ -44,6 +51,7 @@ type Exporter struct {
   indexbytes      *prometheus.GaugeVec
   lobbytes        *prometheus.GaugeVec
   lastIp          string
+  config          Configs
   vTabRows        bool
   vTabBytes       bool
   vIndBytes       bool
@@ -55,11 +63,12 @@ var (
   Version       = "1.1.0"
   listenAddress = flag.String("web.listen-address", ":9161", "Address to listen on for web interface and telemetry.")
   metricPath    = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+  scrapePath    = flag.String("web.scrape-path", "/scrape", "Path under which to expose metrics for individual database scrapes.")
   pTabRows      = flag.Bool("tablerows", false, "Expose Table rows (CAN TAKE VERY LONG)")
   pTabBytes     = flag.Bool("tablebytes", false, "Expose Table size (CAN TAKE VERY LONG)")
   pIndBytes     = flag.Bool("indexbytes", false, "Expose Index size for any Table (CAN TAKE VERY LONG)")
   pLobBytes     = flag.Bool("lobbytes", false, "Expose Lobs size for any Table (CAN TAKE VERY LONG)")
-  configFile    = flag.String("configfile", "oracle.conf", "ConfigurationFile in YAML format.")
+  configFile    = flag.String("configfile", "oracle.yml", "ConfigurationFile in YAML format.")
   logFile       = flag.String("logfile", "exporter.log", "Logfile for parsed Oracle Alerts.")
   accessFile    = flag.String("accessfile", "access.conf", "Last access for parsed Oracle Alerts.")
   landingPage   = []byte(`<html>
@@ -73,6 +82,7 @@ var (
                             <a href='` + *metricPath + `?lobbytes=true'>Metrics with lobbytes</a></p>
                           </body>
                           </html>`)
+  metricsExporter *Exporter
 )
 
 // NewExporter returns a new Oracle DB exporter for the provided DSN.
@@ -216,7 +226,7 @@ func (e *Exporter) ScrapeQuery() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     //num  metric_name
     //43  sessions
     if conn.db != nil {
@@ -244,7 +254,7 @@ func (e *Exporter) ScrapeParameter() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     //num  metric_name
     //43  sessions
     if conn.db != nil {
@@ -273,7 +283,7 @@ func (e *Exporter) ScrapeServices() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`select name from v$active_services`)
       if err != nil {
@@ -299,7 +309,7 @@ func (e *Exporter) ScrapeCache() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     //metric_id  metric_name
     //2000    Buffer Cache Hit Ratio
     //2050    Cursor Cache Hit Ratio
@@ -333,7 +343,7 @@ func (e *Exporter) ScrapeRedo() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`select count(*) from v$log_history where first_time > sysdate - 1/24/12`)
       if err != nil {
@@ -357,7 +367,7 @@ func (e *Exporter) ScrapeRecovery() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`SELECT sum(percent_space_used) , sum(percent_space_reclaimable)
                                  from V$FLASH_RECOVERY_AREA_USAGE`)
@@ -384,7 +394,7 @@ func (e *Exporter) ScrapeInterconnect() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`SELECT name, value
                                  FROM V$SYSSTAT
@@ -412,7 +422,7 @@ func (e *Exporter) ScrapeAsmspace() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`SELECT g.name, sum(d.total_mb), sum(d.free_mb)
                                   FROM v$asm_disk d, v$asm_diskgroup g
@@ -445,7 +455,7 @@ func (e *Exporter) ScrapeTablespace() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`WITH
                                    getsize AS (SELECT tablespace_name, autoextensible, SUM(bytes) tsize
@@ -488,7 +498,7 @@ func (e *Exporter) ScrapeSession() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`SELECT decode(username,NULL,'SYSTEM','SYS','SYSTEM','USER'), status,count(*)
                                  FROM v$session
@@ -514,7 +524,7 @@ func (e *Exporter) ScrapeSession() {
 // ScrapeUptime Instance uptime
 func (e *Exporter) ScrapeUptime() {
   var uptime float64
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       err := conn.db.QueryRow("select sysdate-startup_time from v$instance").Scan(&uptime)
       if err != nil {
@@ -531,7 +541,7 @@ func (e *Exporter) ScrapeSysstat() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`SELECT name, value FROM v$sysstat
                                     WHERE statistic# in (6,7,1084,1089)`)
@@ -558,7 +568,7 @@ func (e *Exporter) ScrapeWaitclass() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`SELECT n.wait_class, round(m.time_waited/m.INTSIZE_CSEC,3)
                                     FROM v$waitclassmetric  m, v$system_wait_class n
@@ -586,7 +596,7 @@ func (e *Exporter) ScrapeSysmetric() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     //metric_id  metric_name
     //2092    Physical Read Total IO Requests Per Sec
     //2093    Physical Read Total Bytes Per Sec
@@ -617,7 +627,7 @@ func (e *Exporter) ScrapeTablerows() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`select owner,table_name, tablespace_name, num_rows
                                  from dba_tables
@@ -647,7 +657,7 @@ func (e *Exporter) ScrapeTablebytes() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`SELECT tab.owner, tab.table_name,  stab.bytes
                                  FROM dba_tables  tab, dba_segments stab
@@ -677,7 +687,7 @@ func (e *Exporter) ScrapeIndexbytes() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`select table_owner,table_name, sum(bytes)
                                  from dba_indexes ind, dba_segments seg
@@ -708,7 +718,7 @@ func (e *Exporter) ScrapeLobbytes() {
     rows *sql.Rows
     err  error
   )
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
       rows, err = conn.db.Query(`select l.owner, l.table_name, sum(bytes)
                                  from dba_lobs l, dba_segments seg
@@ -763,35 +773,39 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
 // Connect the DBs and gather Databasename and Instancename
 func (e *Exporter) Connect() {
-  var dbname string
-  var inname string
   var err error
 
-  for i, conf := range config.Cfgs {
-    // Close Connect from former scrape that not closed properly
-    if config.Cfgs[i].db != nil {
-       config.Cfgs[i].db.Close()
-       config.Cfgs[i].db = nil
-    }
-    config.Cfgs[i].db , err = sql.Open("oci8", conf.Connection)
+  for i, _ := range e.config.Cfgs {
+    conf := &e.config.Cfgs[i]
+
+    conf.db , err = sql.Open("oci8", conf.Connection)
+
     if err == nil {
-      err = config.Cfgs[i].db.QueryRow("select db_unique_name,instance_name from v$database,v$instance").Scan(&dbname,&inname)
+//      log.Infoln("Connected", conf.Connection)
+      
+      err = conf.db.QueryRow("select db_unique_name,instance_name from v$database,v$instance").Scan(&conf.Database,&conf.Instance)
+
       if err == nil {
-        if (conf.Database != dbname) || (conf.Instance != inname) {
-          config.Cfgs[i].Database = dbname
-          config.Cfgs[i].Instance = inname
-        }
-        e.up.WithLabelValues(config.Cfgs[i].Database, config.Cfgs[i].Instance).Set(1)
+        e.up.WithLabelValues(conf.Database, conf.Instance).Set(1)
       } else {
-        config.Cfgs[i].db.Close()
-        config.Cfgs[i].db = nil;
+        if conf.db != nil {
+          conf.db.Close()
+          conf.db = nil
+        }
+//        log.Infoln("Connect OK, Inital query failed: ", conf.Connection, err)
         e.up.WithLabelValues(conf.Database,conf.Instance).Set(0)
-        // log.Infoln("Connect OK, Inital query failed: ", conf.Connection)
       }
     } else {
+      if conf.db != nil {
+        conf.db.Close()
+        conf.db = nil
+      }
+
+//      log.Infoln("Error", err)
       e.up.WithLabelValues(conf.Database,conf.Instance).Set(0)
     }
   }
+
   e.session.Reset()
   e.sysstat.Reset()
   e.waitclass.Reset()
@@ -816,8 +830,9 @@ func (e *Exporter) Connect() {
 
 // Close Connections
 func (e *Exporter) Close() {
-  for _, conn := range config.Cfgs {
+  for _, conn := range e.config.Cfgs {
     if conn.db != nil {
+//      log.Infoln("Close", conn.Connection)
       conn.db.Close()
       conn.db = nil
     }
@@ -839,7 +854,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
     }
   }(time.Now())
 
+  defer e.Close()
   e.Connect()
+
   e.up.Collect(ch)
 
   e.ScrapeUptime()
@@ -912,8 +929,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
   ch <- e.totalScrapes
   ch <- e.error
   e.scrapeErrors.Collect(ch)
-
-  e.Close()
 }
 
 func (e *Exporter) Handler(w http.ResponseWriter, r *http.Request) {
@@ -933,17 +948,90 @@ func (e *Exporter) Handler(w http.ResponseWriter, r *http.Request) {
   prometheus.Handler().ServeHTTP(w, r)
 }
 
+func ScrapeHandler(w http.ResponseWriter, r *http.Request) {
+  r.Close = true
+  target := r.URL.Query().Get("target")
+
+  exporter := NewExporter()
+ 
+  for _, conn := range metricsExporter.config.Cfgs {
+     if conn.Database == target {
+        exporter.config.Cfgs = append(exporter.config.Cfgs, conn)
+     }
+  }
+
+  if len(exporter.config.Cfgs) == 0 {
+    http.Error(w, fmt.Sprintf("Target not found %v", target), 400)
+    return
+  }
+
+
+  exporter.lastIp = ""
+  ip, _, err := net.SplitHostPort(r.RemoteAddr)
+  if err == nil {
+    exporter.lastIp = ip
+  }
+  exporter.vTabRows  = false
+  exporter.vTabBytes = false
+  exporter.vIndBytes = false
+  exporter.vLobBytes = false
+  if r.URL.Query().Get("tablerows") == "true" {; exporter.vTabRows = true; }
+  if r.URL.Query().Get("tablebytes") == "true" {; exporter.vTabBytes = true; }
+  if r.URL.Query().Get("indexbytes") == "true" {; exporter.vIndBytes = true; }
+  if r.URL.Query().Get("lobbytes") == "true" {; exporter.vLobBytes = true; }
+
+  registry := prometheus.NewRegistry()
+  registry.MustRegister(exporter)
+
+  // Delegate http serving to Prometheus client library, which will call collector.Collect.
+  h := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+
+  h.ServeHTTP(w, r)
+}
+
+func (e *Exporter) LoadConfig() bool {
+  path, err := filepath.Abs(filepath.Dir(os.Args[0]))
+  if err != nil {
+    log.Fatalf("error: %v", err)
+  }
+  pwd = path
+  content, err := ioutil.ReadFile(*configFile)
+  if err != nil {
+      log.Fatalf("error: %v", err)
+      return false
+  } else {
+    err := yaml.Unmarshal(content, &e.config)
+    if err != nil {
+      log.Fatalf("error: %v", err)
+      return false
+    }
+    return true
+  }
+}
+
 func main() {
   flag.Parse()
   log.Infoln("Starting Prometheus Oracle exporter " + Version)
-  if loadConfig() {
-    log.Infoln("Config loaded: ", *configFile)
-    exporter := NewExporter()
-    prometheus.MustRegister(exporter)
+  metricsExporter = NewExporter()
 
-    http.HandleFunc(*metricPath, exporter.Handler)
+  if metricsExporter.LoadConfig() {
+    log.Infoln("Config loaded: ", *configFile)
+    prometheus.MustRegister(metricsExporter)
+
+    http.HandleFunc(*metricPath, metricsExporter.Handler)
+    http.HandleFunc(*scrapePath, ScrapeHandler)
 
     http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {w.Write(landingPage)})
+    http.HandleFunc("/pprof/", pprof.Index)
+    http.HandleFunc("/pprof/cmdline", pprof.Cmdline)
+    http.HandleFunc("/pprof/profile", pprof.Profile)
+    http.HandleFunc("/pprof/symbol", pprof.Symbol)
+
+    http.Handle("/pprof/goroutine", pprof.Handler("goroutine"))
+    http.Handle("/pprof/heap", pprof.Handler("heap"))
+    http.Handle("/pprof/threadcreate", pprof.Handler("threadcreate"))
+    http.Handle("/pprof/block", pprof.Handler("block"))
+
 
     log.Infoln("Listening on", *listenAddress)
     log.Fatal(http.ListenAndServe(*listenAddress, nil))

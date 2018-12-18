@@ -6,7 +6,6 @@ import (
     "strings"
     "io/ioutil"
     "gopkg.in/yaml.v2"
-    "path/filepath"
     "database/sql"
     "github.com/prometheus/common/log"
   _ "github.com/mattn/go-oci8"
@@ -36,7 +35,6 @@ type Configs struct {
 }
 
 var (
-   config        Configs
    pwd           string
 )
 
@@ -54,26 +52,6 @@ func cleanIp(s string) string {
   s = strings.Replace(s, ":", "", -1) // Remove spaces
   s = strings.Replace(s, ".", "_", -1)  // Remove open parenthesis
   return s
-}
-
-func loadConfig() bool {
-  path, err := filepath.Abs(filepath.Dir(os.Args[0]))
-  if err != nil {
-    log.Fatalf("error: %v", err)
-  }
-  pwd = path
-  content, err := ioutil.ReadFile(*configFile)
-  if err != nil {
-      log.Fatalf("error: %v", err)
-      return false
-  } else {
-    err := yaml.Unmarshal(content, &config)
-    if err != nil {
-      log.Fatalf("error: %v", err)
-      return false
-    }
-    return true
-  }
 }
 
 func ReadAccess(){
