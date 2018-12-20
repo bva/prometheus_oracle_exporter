@@ -1,0 +1,18 @@
+connections:
+ - connection: <user>/<pass>@<tnsname>
+   database: DEVELOP
+   instance: DEVELOP
+   queries:
+    - sql: "select 1 from dual"
+      name: sample1
+    - sql: "select 2 from dual"
+      name: sample2
+
+ - connection: <user>/<pass>@<tnsname>
+   database: STAGE
+   instance: STAGE
+   queries:
+    - sql: "select 3 from dual"
+      name: sample3
+    - sql: "select 4 from dual"
+      name: sample3
